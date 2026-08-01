@@ -1,0 +1,13 @@
+# 运行数据（勿提交）
+state.json
+watcher.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# 系统
+*.log
+.DS_Store

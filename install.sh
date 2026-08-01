@@ -49,25 +49,38 @@ done
 [ "$(id -u)" -eq 0 ] || die "请使用 root 权限运行，例如：sudo bash install.sh"
 [ -d /run/systemd/system ] || die "当前系统未运行 systemd，暂不支持 OpenRC、容器或 WSL 环境"
 
+venv_usable() {
+  command -v "$PYTHON" >/dev/null 2>&1 \
+    && "$PYTHON" -c 'import ensurepip, venv' >/dev/null 2>&1
+}
+
 install_dependencies() {
   local need_install=0
+  local python_version=""
+  local versioned_venv_package=""
   command -v curl >/dev/null 2>&1 || need_install=1
   command -v tar >/dev/null 2>&1 || need_install=1
   command -v "$PYTHON" >/dev/null 2>&1 || need_install=1
-  if command -v "$PYTHON" >/dev/null 2>&1; then
-    "$PYTHON" -m venv --help >/dev/null 2>&1 || need_install=1
-  fi
+  venv_usable || need_install=1
   [ "$need_install" -eq 0 ] && return
 
   info "安装系统依赖（curl、tar、Python、venv）……"
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq ca-certificates curl tar python3 python3-venv
+    apt-get install -y -qq ca-certificates curl tar python3
+    if ! venv_usable; then
+      python_version="$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+      versioned_venv_package="python${python_version}-venv"
+      info "安装与 Python ${python_version} 匹配的 venv：${versioned_venv_package}"
+      apt-get install -y -qq "$versioned_venv_package" \
+        || apt-get install -y -qq python3-venv \
+        || die "无法安装 $versioned_venv_package 或 python3-venv"
+    fi
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y ca-certificates curl tar python3
+    dnf install -y ca-certificates curl tar python3 python3-pip
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y ca-certificates curl tar python3
+    yum install -y ca-certificates curl tar python3 python3-pip
   else
     die "无法识别包管理器，请先安装 curl、tar、python3 和 python3-venv"
   fi
@@ -77,7 +90,7 @@ install_dependencies
 command -v curl >/dev/null 2>&1 || die "curl 安装失败"
 command -v tar >/dev/null 2>&1 || die "tar 安装失败"
 command -v "$PYTHON" >/dev/null 2>&1 || die "python3 安装失败"
-"$PYTHON" -m venv --help >/dev/null 2>&1 || die "Python venv 不可用，请安装 python3-venv"
+venv_usable || die "Python venv/ensurepip 不可用，请安装与当前 Python 版本匹配的 venv 软件包"
 command -v systemctl >/dev/null 2>&1 || die "systemctl 不可用"
 command -v useradd >/dev/null 2>&1 || die "useradd 不可用"
 
@@ -213,9 +226,10 @@ if [ -f "$INSTALL_DIR/state.json" ]; then
   chmod 600 "$INSTALL_DIR/state.json"
 fi
 
-if [ ! -x "$INSTALL_DIR/venv/bin/python" ]; then
-  info "创建 Python 虚拟环境……"
-  "$PYTHON" -m venv "$INSTALL_DIR/venv"
+if [ ! -x "$INSTALL_DIR/venv/bin/python" ] || [ ! -x "$INSTALL_DIR/venv/bin/pip" ]; then
+  info "创建或修复 Python 虚拟环境……"
+  "$PYTHON" -m venv --clear "$INSTALL_DIR/venv" \
+    || die "虚拟环境创建失败，请确认已安装与当前 Python 版本匹配的 venv 软件包"
 fi
 "$INSTALL_DIR/venv/bin/pip" install --quiet --disable-pip-version-check \
   -r "$INSTALL_DIR/requirements.txt" || die "Python 依赖安装失败"

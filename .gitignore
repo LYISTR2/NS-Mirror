@@ -1,6 +1,10 @@
 # 运行数据（勿提交）
 state.json
 watcher.env
+.env
+data/
+backups/
+*.sha256
 
 # Python
 __pycache__/

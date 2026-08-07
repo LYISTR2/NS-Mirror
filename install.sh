@@ -94,7 +94,7 @@ venv_usable || die "Python venv/ensurepip 不可用，请安装与当前 Python 
 command -v systemctl >/dev/null 2>&1 || die "systemctl 不可用"
 command -v useradd >/dev/null 2>&1 || die "useradd 不可用"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 TMP_SRC=""
 cleanup() {
   if [ -n "$TMP_SRC" ] && [ -d "$TMP_SRC" ]; then

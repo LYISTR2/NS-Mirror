@@ -16,12 +16,72 @@
 
 ## 环境要求
 
-- Debian 11/12/13、Ubuntu 20.04+，或使用 systemd 的 RHEL 系发行版
+- **Docker 方式（推荐）**：Debian、Ubuntu、RHEL 系 Linux；已有 Docker 可直接使用，没有时一键脚本会安装 Docker Engine 与 Compose v2
+- **systemd 方式（兼容保留）**：Debian 11/12/13、Ubuntu 20.04+，或使用 systemd 的 RHEL 系发行版
 - root 或 sudo 权限
 - 服务器可以访问 `rss.nodeseek.com`、`api.telegram.org` 和 GitHub
 - 一个 Telegram Bot Token
 
-> 当前安装脚本依赖 systemd，不支持 Alpine/OpenRC、Docker 容器和 WSL。
+> Docker 版不开放任何端口，只有出站网络请求；配置和运行数据集中在 `/opt/docker/ns-mirror/`，适合整目录备份、迁移和恢复。
+
+## Docker 一键安装（推荐）
+
+安装脚本会**先让你输入并验证 Bot Token、识别 Telegram 用户 ID，然后才安装 Docker**。Token 输入时不会回显，也不会作为命令参数写入 Shell 历史。
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/LYISTR2/NS-Mirror/main/docker-install.sh)
+```
+
+脚本会自动完成：
+
+1. 验证 Bot Token，并自动识别或读取 Telegram 用户 ID；
+2. 检测 Docker 与 Compose v2，缺失时使用当前系统包管理器安装；
+3. 将项目部署到 `/opt/docker/ns-mirror/`；
+4. 构建非 root、只读文件系统容器；
+5. 将关键词与帖子游标持久化到 `/opt/docker/ns-mirror/data/`；
+6. 启动容器并发送 Telegram 测试消息。
+
+### Docker 管理
+
+```bash
+sudo bash /opt/docker/ns-mirror/docker-manage.sh status
+sudo bash /opt/docker/ns-mirror/docker-manage.sh logs
+sudo bash /opt/docker/ns-mirror/docker-manage.sh restart
+sudo bash /opt/docker/ns-mirror/docker-manage.sh update
+sudo bash /opt/docker/ns-mirror/docker-manage.sh reconfigure
+```
+
+### 一键备份与迁移
+
+在旧服务器生成迁移包：
+
+```bash
+sudo bash /opt/docker/ns-mirror/docker-manage.sh backup
+```
+
+会在 `/opt/docker/ns-mirror/backups/` 生成：
+
+```text
+ns-mirror-backup-YYYYMMDD-HHMMSS.tar.gz
+ns-mirror-backup-YYYYMMDD-HHMMSS.tar.gz.sha256
+```
+
+迁移包包含 Docker 配置、Bot Token、Telegram 用户 ID、关键词和帖子游标。它等同于敏感凭据备份，传输后应限制权限，迁移完成后及时删除不需要的副本。
+
+在新服务器放好迁移包与校验文件后执行；如果尚未安装 Docker/Compose，恢复脚本会自动安装：
+
+```bash
+sudo env INSTALL_DIR=/opt/docker/ns-mirror bash docker-manage.sh restore ./ns-mirror-backup-YYYYMMDD-HHMMSS.tar.gz
+```
+
+如果新服务器还没有管理脚本，可先下载：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LYISTR2/NS-Mirror/main/docker-manage.sh -o docker-manage.sh
+chmod +x docker-manage.sh
+```
+
+恢复程序会校验 SHA256（存在校验文件时）、检查归档路径安全、备份当前目录、恢复数据、重新构建并启动容器。
 
 ## 准备 Telegram Bot
 
@@ -31,7 +91,7 @@
 
 Bot Token 属于敏感凭据，请勿发布到聊天记录、截图或 GitHub。
 
-## 一键安装
+## systemd 一键安装（兼容方式）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LYISTR2/NS-Mirror/main/install.sh | sudo bash
@@ -129,6 +189,19 @@ sudo journalctl -u nodeseek-watcher -n 100 --no-pager
 
 ## 文件位置
 
+### Docker 版
+
+| 路径 | 用途 |
+|---|---|
+| `/opt/docker/ns-mirror/compose.yaml` | Compose 配置 |
+| `/opt/docker/ns-mirror/.env` | Bot Token 与用户 ID，权限 `600` |
+| `/opt/docker/ns-mirror/data/keywords.json` | 关键词列表 |
+| `/opt/docker/ns-mirror/data/state.json` | 最新帖子游标 |
+| `/opt/docker/ns-mirror/backups/` | 一键迁移备份 |
+| `/opt/docker/ns-mirror/docker-manage.sh` | 状态、日志、更新、备份、恢复、卸载 |
+
+### systemd 版
+
 | 路径 | 用途 | 权限/维护方式 |
 |---|---|---|
 | `/opt/nodeseek-watcher/nodeseek_watcher.py` | 主程序 | 安装脚本更新 |
@@ -139,7 +212,14 @@ sudo journalctl -u nodeseek-watcher -n 100 --no-pager
 
 ## 测试与排错
 
-发送 Telegram 测试消息：
+Docker 版查看日志和发送测试消息：
+
+```bash
+sudo bash /opt/docker/ns-mirror/docker-manage.sh logs
+sudo bash -c 'cd /opt/docker/ns-mirror && docker compose --env-file .env exec -T watcher python /app/nodeseek_watcher.py --test'
+```
+
+systemd 版发送测试消息：
 
 ```bash
 sudo bash -c 'set -a; source /opt/nodeseek-watcher/watcher.env; set +a; /opt/nodeseek-watcher/venv/bin/python /opt/nodeseek-watcher/nodeseek_watcher.py --test'
@@ -163,6 +243,20 @@ sudo systemctl start nodeseek-watcher
 
 ## 卸载
 
+Docker 版（默认保留整个项目目录）：
+
+```bash
+sudo bash /opt/docker/ns-mirror/docker-manage.sh uninstall
+```
+
+同时删除 Token、关键词、游标和备份：
+
+```bash
+sudo bash /opt/docker/ns-mirror/docker-manage.sh uninstall --purge
+```
+
+systemd 版：
+
 ```bash
 sudo bash /opt/nodeseek-watcher/uninstall.sh
 ```
@@ -172,6 +266,7 @@ sudo bash /opt/nodeseek-watcher/uninstall.sh
 ## 安全说明
 
 - Bot Token 保存在权限为 `600` 的 `watcher.env` 中，不写入代码和 Git 仓库。
+- Docker 版将 Token 保存为权限 `600` 的 `.env`，容器不映射端口、使用非 root 用户、只读根文件系统、移除全部 Linux capabilities。
 - 服务以独立的 `nodeseek-watcher` 系统用户运行，不使用 root 常驻。
 - systemd 启用了 `NoNewPrivileges`、文件系统保护、空 Capability 集等限制。
 - Telegram 管理指令仅接受绑定用户 ID；其他聊天发送的消息会被确认游标后忽略。

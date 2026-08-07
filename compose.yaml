@@ -1,0 +1,32 @@
+name: ns-mirror
+
+services:
+  watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ns-mirror:local
+    container_name: ns-mirror
+    restart: unless-stopped
+    init: true
+    environment:
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN:?请在 .env 中设置 TG_BOT_TOKEN}
+      TG_CHAT_ID: ${TG_CHAT_ID:?请在 .env 中设置 TG_CHAT_ID}
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; assert os.getenv('TG_BOT_TOKEN') and os.getenv('TG_CHAT_ID') and os.path.isdir('/data')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

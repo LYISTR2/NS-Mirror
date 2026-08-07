@@ -297,6 +297,6 @@ printf '\n%b\n' "${GREEN}安装完成${NC}"
 printf '%s\n' \
   "服务状态：systemctl status $SERVICE_NAME" \
   "实时日志：journalctl -u $SERVICE_NAME -f" \
-  "修改关键词：在 Telegram 中使用 /add、/del、/list" \
+  "修改关键词：在 Telegram 中发送 /panel 打开控制面板" \
   "重新配置：sudo bash $INSTALL_DIR/install.sh --reconfigure" \
   "卸载程序：sudo bash $INSTALL_DIR/uninstall.sh"

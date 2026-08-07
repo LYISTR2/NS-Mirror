@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -37,8 +38,10 @@ log = logging.getLogger("nodeseek-watcher")
 _KEYWORDS_LOCK = threading.RLock()
 _RSS_SESSION = requests.Session()
 _RSS_SESSION.trust_env = False  # RSS 明确直连，不继承 HTTP(S)_PROXY
+_TG_UPDATE_SESSION = requests.Session()
 _TG_SEND_SESSION = requests.Session()
 _TG_SEND_LOCK = threading.Lock()  # requests.Session 本身不保证跨线程安全
+PENDING_INPUT: dict[str, str] = {}
 
 
 def _atomic_write_json(path: str, value: Any) -> None:
@@ -134,15 +137,27 @@ def del_keyword(keyword: str) -> tuple[bool, str]:
         index = next((i for i, item in enumerate(KEYWORDS) if item.casefold() == folded), None)
         if index is None:
             return False, f"「{html.escape(keyword)}」不存在"
-        candidate = KEYWORDS.copy()
-        candidate.pop(index)
-        try:
-            save_keywords(candidate)
-        except OSError as exc:
-            log.error("保存关键词失败: %s", exc)
-            return False, "保存关键词失败，请稍后重试"
-        KEYWORDS[:] = candidate
+        return _del_keyword_at_locked(index)
+
+
+def _del_keyword_at_locked(index: int) -> tuple[bool, str]:
+    keyword = KEYWORDS[index]
+    candidate = KEYWORDS.copy()
+    candidate.pop(index)
+    try:
+        save_keywords(candidate)
+    except OSError as exc:
+        log.error("保存关键词失败: %s", exc)
+        return False, "保存关键词失败，请稍后重试"
+    KEYWORDS[:] = candidate
     return True, f"✅ 已删除「{html.escape(keyword)}」"
+
+
+def del_keyword_at(index: int) -> tuple[bool, str]:
+    with _KEYWORDS_LOCK:
+        if index < 0 or index >= len(KEYWORDS):
+            return False, "关键词列表已变化，请刷新面板"
+        return _del_keyword_at_locked(index)
 
 
 def list_keywords() -> str:
@@ -151,6 +166,21 @@ def list_keywords() -> str:
         return "📋 当前没有关键词"
     lines = "\n".join(f"{index}. {html.escape(keyword)}" for index, keyword in enumerate(keywords, 1))
     return f"📋 当前关键词（{len(keywords)} 个）：\n{lines}"
+
+
+def control_panel() -> tuple[str, dict[str, list[list[dict[str, str]]]]]:
+    keywords = keyword_snapshot()
+    keyword_text = "\n".join(f"{index}. {html.escape(word)}" for index, word in enumerate(keywords, 1))
+    text = ("🛰 <b>NodeSeek 监控控制面板</b>\n\n"
+            f"状态：✅ 运行中\n检查间隔：{POLL_INTERVAL} 秒\n"
+            f"关键词：{len(keywords)} 个\n\n{keyword_text or '当前没有关键词'}\n\n"
+            "点击关键词按钮可直接删除。")
+    rows = [[{"text": "➕ 添加关键词", "callback_data": "panel:add"},
+             {"text": "🔄 刷新", "callback_data": "panel:refresh"}]]
+    rows.extend([{"text": f"❌ {word[:24]}", "callback_data": f"kw:del:{index}"}]
+                for index, word in enumerate(keywords))
+    rows.append([{"text": "❓ 帮助", "callback_data": "panel:help"}])
+    return text, {"inline_keyboard": rows}
 
 
 def fetch_rss() -> bytes:
@@ -247,19 +277,14 @@ def _telegram_api_ok(response: requests.Response) -> bool:
     return True
 
 
-def send_tg(text: str) -> bool:
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    for attempt in range(3):
+def tg_request(method: str, payload: dict[str, Any], retries: int = 3) -> bool:
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/{method}"
+    for attempt in range(retries):
         try:
             with _TG_SEND_LOCK:
                 response = _TG_SEND_SESSION.post(
                     url,
-                    json={
-                        "chat_id": TG_CHAT_ID,
-                        "text": text,
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": False,
-                    },
+                    json=payload,
                     timeout=(5, 15),
                 )
             if response.status_code == 429:
@@ -272,14 +297,50 @@ def send_tg(text: str) -> bool:
             _telegram_api_ok(response)
             return True
         except (requests.RequestException, RuntimeError) as exc:
-            log.error("TG 推送失败(第%d次): %s", attempt + 1, exc)
-            if attempt < 2:
+            log.error("TG %s 失败(第%d次): %s", method, attempt + 1, exc)
+            if attempt + 1 < retries:
                 time.sleep(2**attempt)
     return False
 
 
+def send_tg(text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
+    payload: dict[str, Any] = {
+        "chat_id": TG_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return tg_request("sendMessage", payload)
+
+
+def show_panel() -> bool:
+    text, markup = control_panel()
+    return send_tg(text, reply_markup=markup)
+
+
+def edit_panel(message_id: int) -> bool:
+    text, markup = control_panel()
+    return tg_request("editMessageText", {
+        "chat_id": TG_CHAT_ID,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": markup,
+    }, retries=1)
+
+
+def answer_callback(callback_id: str, text: str = "", *, alert: bool = False) -> bool:
+    payload: dict[str, Any] = {"callback_query_id": callback_id, "show_alert": alert}
+    if text:
+        payload["text"] = text[:200]
+    return tg_request("answerCallbackQuery", payload, retries=1)
+
+
 def handle_command(text: str | None) -> bool:
-    """处理主人发来的指令；非指令或未知指令返回 False。"""
+    """保留少量快捷指令；日常管理使用内联控制面板。"""
     text = (text or "").strip()
     if not text.startswith("/"):
         return False
@@ -287,10 +348,8 @@ def handle_command(text: str | None) -> bool:
     command = parts[0].split("@", 1)[0].lower()  # 兼容 /add@BotName
     args = parts[1:]
 
-    if command == "/start":
-        send_tg("👋 欢迎使用 NodeSeek 关键词监控\n\n"
-                "指令：\n/add 词1 词2 — 添加关键词\n"
-                "/del 词 — 删除关键词\n/list — 查看当前关键词\n/help — 帮助")
+    if command in ("/start", "/panel"):
+        show_panel()
         return True
     if command in ("/list", "/kw", "/keywords"):
         send_tg(list_keywords())
@@ -302,23 +361,93 @@ def handle_command(text: str | None) -> bool:
         send_tg("\n".join(del_keyword(arg)[1] for arg in args) if args else "用法：/del 关键词")
         return True
     if command == "/help":
-        send_tg("📖 使用说明\n\n"
-                "/add 词1 词2 — 添加关键词（标题命中即推送）\n"
-                "/del 词 — 删除关键词\n/list — 查看当前关键词")
+        send_tg("📖 <b>使用说明</b>\n\n发送 /panel 打开控制面板。\n"
+                "点击“添加关键词”后直接发送关键词；点击关键词按钮可删除。\n\n"
+                "兼容指令：/add、/del、/list")
         return True
     return False
 
 
+def handle_message(text: str | None, chat_id: str) -> bool:
+    text = (text or "").strip()
+    mode = PENDING_INPUT.get(chat_id)
+    if text.startswith("/"):
+        PENDING_INPUT.pop(chat_id, None)
+        return handle_command(text)
+    if not mode or not text:
+        return handle_command(text)
+    PENDING_INPUT.pop(chat_id, None)
+    words = text.split()
+    if mode == "add":
+        send_tg("\n".join(add_keyword(word)[1] for word in words))
+        show_panel()
+        return True
+    return False
+
+
+def handle_callback(data: str, callback_id: str, chat_id: str, message_id: int | None = None) -> bool:
+    if data == "panel:add":
+        PENDING_INPUT[chat_id] = "add"
+        answer_callback(callback_id, "请发送关键词")
+        send_tg("请输入要添加的关键词；多个关键词请用空格分隔。",
+                reply_markup={"inline_keyboard": [[
+                    {"text": "取消", "callback_data": "panel:cancel"}
+                ]]})
+        return True
+    if data == "panel:cancel":
+        PENDING_INPUT.pop(chat_id, None)
+        answer_callback(callback_id, "已取消")
+        return True
+    if data == "panel:help":
+        answer_callback(callback_id)
+        send_tg("点击“添加关键词”后发送文字即可添加；点击带 ❌ 的关键词即可删除。")
+        return True
+    if data == "panel:refresh":
+        answer_callback(callback_id, "已刷新")
+        return edit_panel(message_id) if message_id is not None else show_panel()
+    if data.startswith("kw:del:"):
+        try:
+            index = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            answer_callback(callback_id, "无效操作", alert=True)
+            return True
+        ok, message = del_keyword_at(index)
+        answer_callback(callback_id, re.sub(r"<[^>]+>", "", message), alert=not ok)
+        if message_id is not None:
+            edit_panel(message_id)
+        return True
+    answer_callback(callback_id, "未知操作", alert=True)
+    return False
+
+
+def process_update(update: dict[str, Any]) -> None:
+    callback = update.get("callback_query")
+    if isinstance(callback, dict):
+        callback_id = str(callback.get("id", ""))
+        sender_id = str((callback.get("from") or {}).get("id", ""))
+        message = callback.get("message") or {}
+        chat_id = str((message.get("chat") or {}).get("id", sender_id))
+        if sender_id != str(TG_CHAT_ID) or chat_id != str(TG_CHAT_ID):
+            answer_callback(callback_id, "无权操作", alert=True)
+            return
+        handle_callback(str(callback.get("data", "")), callback_id, chat_id, message.get("message_id"))
+        return
+
+    message = update.get("message") or update.get("edited_message") or {}
+    chat_id = str((message.get("chat") or {}).get("id", ""))
+    if chat_id == str(TG_CHAT_ID):
+        handle_message(message.get("text"), chat_id)
+
+
 def updates_loop() -> None:
-    """getUpdates 长轮询线程：只处理配置 chat_id 的文本指令。"""
+    """getUpdates 长轮询线程：处理绑定用户的消息和内联按钮。"""
     offset: int | None = None
-    session = requests.Session()
     while True:
         try:
             params: dict[str, int] = {"timeout": 25}
             if offset is not None:
                 params["offset"] = offset
-            response = session.get(
+            response = _TG_UPDATE_SESSION.get(
                 f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates",
                 params=params,
                 timeout=(5, 35),
@@ -332,13 +461,10 @@ def updates_loop() -> None:
                     continue
                 # 即使消息格式异常或不是主人消息，也确认该 update，避免永久卡住。
                 offset = max(offset or 0, update["update_id"] + 1)
-                message = update.get("message") or update.get("edited_message") or {}
-                chat = message.get("chat") or {}
-                if str(chat.get("id")) == str(TG_CHAT_ID):
-                    try:
-                        handle_command(message.get("text"))
-                    except Exception:
-                        log.exception("处理 Telegram 指令失败")
+                try:
+                    process_update(update)
+                except Exception:
+                    log.exception("处理 Telegram 更新失败")
         except (requests.RequestException, RuntimeError, ValueError) as exc:
             log.warning("getUpdates 错误: %s", str(exc)[:200])
             time.sleep(3)

@@ -101,6 +101,30 @@ class ControlPanelTests(unittest.TestCase):
             self.assertTrue(watcher.send_tg("panel", reply_markup={"inline_keyboard": []}))
         self.assertEqual(captured["reply_markup"], {"inline_keyboard": []})
 
+    def test_register_bot_commands_uses_private_chat_scope(self):
+        with patch.object(watcher, "tg_request", return_value=True) as request:
+            self.assertTrue(watcher.register_bot_commands())
+        set_commands, set_menu = request.call_args_list
+        method, payload = set_commands.args
+        self.assertEqual(method, "setMyCommands")
+        self.assertEqual(payload["scope"], {"type": "chat", "chat_id": watcher.TG_CHAT_ID})
+        self.assertNotIn("language_code", payload)
+        commands = {item["command"]: item["description"] for item in payload["commands"]}
+        self.assertIn("panel", commands)
+        self.assertIn("add", commands)
+        self.assertIn("del", commands)
+        self.assertIn("list", commands)
+        self.assertIn("help", commands)
+        self.assertEqual(set_menu.args, (
+            "setChatMenuButton",
+            {"chat_id": watcher.TG_CHAT_ID, "menu_button": {"type": "commands"}},
+        ))
+
+    def test_start_command_opens_panel(self):
+        with patch.object(watcher, "show_panel", return_value=True) as show:
+            self.assertTrue(watcher.handle_command("/start"))
+        show.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

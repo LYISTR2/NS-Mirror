@@ -339,6 +339,24 @@ def answer_callback(callback_id: str, text: str = "", *, alert: bool = False) ->
     return tg_request("answerCallbackQuery", payload, retries=1)
 
 
+def register_bot_commands() -> bool:
+    """为绑定私聊注册 Telegram 输入框旁的 / 命令菜单。"""
+    commands = [
+        {"command": "panel", "description": "打开关键词控制面板"},
+        {"command": "add", "description": "添加关键词，例如 /add dmit"},
+        {"command": "del", "description": "删除关键词，例如 /del dmit"},
+        {"command": "list", "description": "查看当前关键词"},
+        {"command": "help", "description": "查看使用说明"},
+    ]
+    scope = {"type": "chat", "chat_id": TG_CHAT_ID}
+    commands_ok = tg_request("setMyCommands", {"commands": commands, "scope": scope})
+    menu_ok = tg_request("setChatMenuButton", {
+        "chat_id": TG_CHAT_ID,
+        "menu_button": {"type": "commands"},
+    })
+    return commands_ok and menu_ok
+
+
 def handle_command(text: str | None) -> bool:
     """保留少量快捷指令；日常管理使用内联控制面板。"""
     text = (text or "").strip()
@@ -547,6 +565,11 @@ def main() -> None:
         raise SystemExit(2)
     if "--test" in sys.argv:
         raise SystemExit(0 if send_tg("✅ NodeSeek 监控测试消息") else 1)
+
+    if register_bot_commands():
+        log.info("已注册 Telegram / 命令菜单")
+    else:
+        log.warning("Telegram 命令菜单注册失败，监控仍将继续运行")
 
     state = load_state()  # 常驻模式只读一次；仅游标变化时写盘
     if "--once" in sys.argv:

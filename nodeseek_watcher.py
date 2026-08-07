@@ -14,6 +14,8 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
+from datetime import timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Iterable
 
 import requests
@@ -306,11 +308,65 @@ def tg_request(method: str, payload: dict[str, Any], retries: int = 3) -> bool:
     return False
 
 
-def send_tg(text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
+_MDV2_SPECIAL_RE = re.compile(r"([_*[\]()~`>#+\-=|{}.!])")
+
+
+def _mdv2_escape(text: str) -> str:
+    """转义 MarkdownV2 保留字符（`_ * [ ] ( ) ~ ` > # + - = | { } . !`）。"""
+    return _MDV2_SPECIAL_RE.sub(r"\\\1", text)
+
+
+def _mdv2_escape_code(text: str) -> str:
+    """MarkdownV2 code 实体内容转义：只有反斜杠与反引号需要转义。
+
+    Telegram 规定 code/pre 实体内部所有 `` ` `` 与 `` \\ `` 都必须前置反斜杠，
+    其余保留字符在 code 内无需转义。
+    """
+    return text.replace("\\", "\\\\").replace("`", "\\`")
+
+
+def _mdv2_escape_url(url: str) -> str:
+    """MarkdownV2 链接 URL 中只需额外转义反斜杠与右括号，避免链接被截断。"""
+    return url.replace("\\", "\\\\").replace(")", "\\)")
+
+
+_CHINA_TZ = timezone(timedelta(hours=8))
+Alert = tuple[str, str, str]
+
+
+def _format_pub_date(pub_date: str) -> str:
+    """RSS pubDate（RFC 2822）统一转换为北京时间（UTC+8），输出 `YYYY-MM-DD HH:MM`。
+
+    带时区的时间按实际时区换算到 UTC+8；无时区信息的时间按 UTC 处理；
+    解析失败时回退返回原始字符串。
+    """
+    try:
+        parsed = parsedate_to_datetime(pub_date or "")
+    except (TypeError, ValueError, OverflowError):
+        return pub_date
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(_CHINA_TZ).strftime("%Y-%m-%d %H:%M")
+
+
+def alert_body_markdownv2(post_id: int, title: str, url: str, keyword: str, pub_date: str) -> str:
+    """新帖命中通知模板（MarkdownV2），视觉见 README「新帖通知格式」。"""
+    return "\n".join([
+        f"*NS / NEW POST　№ {post_id}*",
+        "",
+        f"[{_mdv2_escape(title)}]({_mdv2_escape_url(url)})",
+        "",
+        f"> 命中关键词：`{_mdv2_escape_code(keyword)}`",
+        f"> 发布时间：`{_mdv2_escape_code(_format_pub_date(pub_date))}`",
+    ])
+
+
+def send_tg(text: str, *, reply_markup: dict[str, Any] | None = None,
+            parse_mode: str = "HTML") -> bool:
     payload: dict[str, Any] = {
         "chat_id": TG_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML",
+        "parse_mode": parse_mode,
         "disable_web_page_preview": False,
     }
     if reply_markup is not None:
@@ -491,11 +547,11 @@ def updates_loop() -> None:
             time.sleep(3)
 
 
-def _matching_alerts(posts: list[dict[str, Any]], last_id: int) -> list[tuple[str, str, str]]:
+def _matching_alerts(posts: list[dict[str, Any]], last_id: int) -> list[Alert]:
     keyword_values = keyword_snapshot()
     keywords = tuple(keyword.casefold() for keyword in keyword_values)
     blacklist = tuple(str(word).casefold() for word in BLACKLIST if str(word))
-    alerts: list[tuple[str, str, str]] = []
+    alerts: list[Alert] = []
     for post in posts:
         if post["id"] <= last_id:
             continue
@@ -504,15 +560,17 @@ def _matching_alerts(posts: list[dict[str, Any]], last_id: int) -> list[tuple[st
         hit_index = next((i for i, keyword in enumerate(keywords) if keyword in folded_title), None)
         if hit_index is None or any(word in folded_title for word in blacklist):
             continue
-        # 推送链接按约定始终使用帖子 ID 构造，避免 RSS 中异常链接进入 HTML 属性。
+        # 推送链接按约定始终使用帖子 ID 构造，避免 RSS 中异常链接进入链接实体。
         url = f"https://www.nodeseek.com/post-{post['id']}-1"
-        body = f"📌 标题：{html.escape(title)}\n🔗 <a href='{html.escape(url, quote=True)}'>查看帖子</a>"
+        keyword = keyword_values[hit_index]
+        pub_date = str(post.get("time", ""))
+        body = alert_body_markdownv2(post["id"], title, url, keyword, pub_date)
         alerts.append((title, url, body))
-        log.info("📢 命中: [%s] %s", keyword_values[hit_index], title)
+        log.info("📢 命中: [%s] %s", keyword, title)
     return alerts
 
 
-def check_once(state: dict[str, int]) -> list[tuple[str, str, str]]:
+def check_once(state: dict[str, int]) -> list[Alert]:
     """检查一轮并更新内存游标；持久化和发送由调用者负责。"""
     posts = parse_posts(fetch_rss())
     if not posts:
@@ -540,7 +598,7 @@ def run_once(state: dict[str, int]) -> bool:
     previous = dict(state)
     alerts = check_once(state)
     for _title, _url, body in alerts:
-        if not send_tg(body):
+        if not send_tg(body, parse_mode="MarkdownV2"):
             state.clear()
             state.update(previous)
             log.error("本轮存在未发送通知，游标未推进，稍后将重试")

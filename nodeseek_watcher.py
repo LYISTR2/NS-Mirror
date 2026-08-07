@@ -177,8 +177,9 @@ def control_panel() -> tuple[str, dict[str, list[list[dict[str, str]]]]]:
             "点击关键词按钮可直接删除。")
     rows = [[{"text": "➕ 添加关键词", "callback_data": "panel:add"},
              {"text": "🔄 刷新", "callback_data": "panel:refresh"}]]
-    rows.extend([{"text": f"❌ {word[:24]}", "callback_data": f"kw:del:{index}"}]
-                for index, word in enumerate(keywords))
+    buttons = [{"text": f"❌ {word[:10]}", "callback_data": f"kw:del:{index}"}
+               for index, word in enumerate(keywords)]
+    rows.extend(buttons[index:index + 4] for index in range(0, len(buttons), 4))
     rows.append([{"text": "❓ 帮助", "callback_data": "panel:help"}])
     return text, {"inline_keyboard": rows}
 

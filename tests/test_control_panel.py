@@ -41,6 +41,17 @@ class ControlPanelTests(unittest.TestCase):
         self.assertIn("panel:refresh", callbacks)
         self.assertIn("kw:del:0", callbacks)
 
+    def test_keyword_delete_buttons_are_grouped_four_per_row(self):
+        watcher.KEYWORDS[:] = [f"word{i}" for i in range(9)]
+        _text, markup = watcher.control_panel()
+        keyword_rows = [
+            row for row in markup["inline_keyboard"]
+            if row and all(button.get("callback_data", "").startswith("kw:del:") for button in row)
+        ]
+        self.assertEqual([len(row) for row in keyword_rows], [4, 4, 1])
+        callbacks = [button["callback_data"] for row in keyword_rows for button in row]
+        self.assertEqual(callbacks, [f"kw:del:{index}" for index in range(9)])
+
     def test_add_flow_prompts_then_consumes_plain_text(self):
         sent = []
         with patch.object(watcher, "answer_callback", return_value=True), patch.object(
